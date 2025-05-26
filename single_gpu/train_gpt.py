@@ -243,7 +243,7 @@ class Rotary(nn.Module):
 
     def forward(self, x_BTHD: Tensor, doc_offsets: Tensor):
         assert self.cos.size(0) >= x_BTHD.size(-3)
-        assert doc_offsets.size(0) == x_BTHD.size(0), f"{doc_offsets.size(0)} != {x_BTHD.size(0)}"
+        assert doc_offsets.size(0) == x_BTHD.size(-3), f"{doc_offsets.size(0)} != {x_BTHD.size(-3)}"
         # Restart rotary position on document start by @BaryLevy_
         cos, sin = self.cos[None, doc_offsets, None, :], self.sin[None, doc_offsets, None, :]
         x1, x2 = x_BTHD.to(dtype=torch.float32).chunk(2, dim=-1)
