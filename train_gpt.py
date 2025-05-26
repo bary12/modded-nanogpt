@@ -241,9 +241,11 @@ class Rotary(nn.Module):
         self.cos = nn.Buffer(theta.cos(), persistent=False)
         self.sin = nn.Buffer(theta.sin(), persistent=False)
 
-    def forward(self, x_BTHD: Tensor):
+    def forward(self, x_BTHD: Tensor, doc_offsets: Tensor):
         assert self.cos.size(0) >= x_BTHD.size(-3)
-        cos, sin = self.cos[None, :x_BTHD.size(-3), None, :], self.sin[None, :x_BTHD.size(-3), None, :]
+        assert doc_offsets.size(0) == x_BTHD.size(-3), f"{doc_offsets.size(0)} != {x_BTHD.size(-3)}"
+        # Restart rotary position on document start by @BaryLevy_
+        cos, sin = self.cos[None, doc_offsets, None, :], self.sin[None, doc_offsets, None, :]
         x1, x2 = x_BTHD.to(dtype=torch.float32).chunk(2, dim=-1)
         y1 = x1 * cos + x2 * sin
         y2 = x1 * (-sin) + x2 * cos
@@ -265,12 +267,12 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = CastedLinear(hdim, dim)
         self.c_proj.weight.detach().zero_() # zero init suggested by @Grad62304977
 
-    def forward(self, x: Tensor, ve: Tensor | None, block_mask: BlockMask):
+    def forward(self, x: Tensor, ve: Tensor | None, block_mask: BlockMask, doc_offsets: Tensor):
         B, T = x.size(0), x.size(1) # batch size, sequence length
         assert B == 1, "Must use batch size = 1 for FlexAttention"
         q, k, v = F.linear(x, self.qkv_w.flatten(end_dim=1).type_as(x)).view(B, T, 3 * self.num_heads, self.head_dim).chunk(3, dim=-2)
         q, k = norm(q), norm(k) # QK norm @Grad62304977
-        q, k = self.rotary(q), self.rotary(k)
+        q, k = self.rotary(q, doc_offsets), self.rotary(k, doc_offsets)
         if ve is not None:
             v = self.lambdas[0] * v + self.lambdas[1] * ve.view_as(v) # @KoszarskyB & @Grad62304977
         else: # skip mid-layers token value embeddings by @YouJiacheng
@@ -304,10 +306,10 @@ class Block(nn.Module):
         self.mlp = MLP(dim)
         self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
 
-    def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, block_mask: BlockMask):
+    def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, block_mask: BlockMask, doc_offsets: Tensor):
         x = self.lambdas[0] * x + self.lambdas[1] * x0
         if self.attn is not None:
-            x = x + self.attn(norm(x), ve, block_mask)
+            x = x + self.attn(norm(x), ve, block_mask, doc_offsets)
         x = x + self.mlp(norm(x))
         return x
 
@@ -386,6 +388,8 @@ class GPT(nn.Module):
         block_masks = [long_bm, short_bm, short_bm, short_bm, long_bm, short_bm, short_bm, long_bm, short_bm, short_bm, short_bm, long_bm]
         assert len(block_masks) == len(self.blocks)
 
+        doc_offsets = GPT.get_doc_offsets(input_seq)
+
         x = x0 = norm(self.embed(input_seq)[None]) # use of norm here by @Grad62304977
 
         # U-net design by @brendanh0gan
@@ -394,7 +398,7 @@ class GPT(nn.Module):
         for i in range(len(self.blocks)):
             if i >= n:
                 x = x + self.skip_weights[i - n] * skip_connections.pop()
-            x = self.blocks[i](x, ve[i], x0, block_masks[i])
+            x = self.blocks[i](x, ve[i], x0, block_masks[i], doc_offsets)
             if i < n:
                 skip_connections.append(x)
 
@@ -405,6 +409,16 @@ class GPT(nn.Module):
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target_seq, reduction='sum' if self.training else 'mean')
         return loss
 
+    @staticmethod
+    def get_doc_offsets(input_seq: Tensor):
+        """ Returns a tensor same size as inputs, with the relative position of each token from the beginning of the document """
+        doc_starts = torch.roll(input_seq == 50256, 1)
+        doc_starts[0] = True
+
+        positions = torch.arange(input_seq.shape[0]).to('cuda')
+        last_eos_position, _ = torch.cummax(positions * doc_starts, dim=0)
+
+        return positions - last_eos_position
 # -----------------------------------------------------------------------------
 # Our own simple Distributed Data Loader
 
