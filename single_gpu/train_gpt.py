@@ -452,7 +452,7 @@ class Hyperparameters:
     # architecture
     vocab_size = 50257
     # evaluation and logging
-    val_loss_every = 125 # every how many steps to evaluate val loss? 0 for only at the end
+    val_loss_every = 0 # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint = False
 args = Hyperparameters()
 
